@@ -2,10 +2,8 @@ import Axios from 'axios';
 import fs from 'fs';
 import puppeteer, { Page } from "puppeteer";
 import "reflect-metadata";
-import Tesseract from 'tesseract.js';
-
-const url =
-  "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E603&minBedrooms=3&maxPrice=375000&radius=20.0&sortType=1&propertyTypes=detached%2Csemi-detached%2Cterraced&primaryDisplayPropertyType=houses&includeSSTC=false&mustHave=&dontShow=retirement%2CsharedOwnership&furnishTypes=&keywords=";
+import tesseract from "node-tesseract-ocr";
+import getSummaryInfo from './summary';
 
 async function downloadImage(url: string, filepath: string) {
   const response = await Axios({
@@ -20,62 +18,137 @@ async function downloadImage(url: string, filepath: string) {
   });
 }
 
-async function getSummary(page: Page, url: string) {
-  await page.goto(url);
+async function getPropertyInfo(page: Page, property: Property) {
+  await page.goto(property.url);
   // Key Info
-  const address = await page.$eval('h1[itemprop="streetAddress"]', el => el.textContent)
-  console.log(`Address: ${address}`)
-  const price = await page.$eval('div[data-skip-to-content] article div[style] span', el => el.textContent)
-  console.log(`Price: ${price}`)
+  property.address = await page.$eval('h1[itemprop="streetAddress"]', el => el.textContent)
+  property.price = await page.$eval('div[data-skip-to-content] article div[style] span', el => el.textContent)
   // Summary Info
-  const infoReel = await page.$$('div[data-test="infoReel"] p')
-  const infoReelKeys = ['Property Type', 'Bedrooms', 'Bathrooms', 'Tenure']
-  for (let i = 0; i < infoReel.length; i++) {
-    let value = await infoReel[i].evaluate(el => el.innerHTML)
-    console.log(`${infoReelKeys[i]}: ${value}`)
-  }
+  property.summaryInfo = await getSummaryInfo(page)
   // Station Info
-  const stationInfo = await page.$$('#Stations-panel li span')
-  const stationInfoKeys = ['Nearest Station Name', 'Nearest Station Distance']
+  const stationInfoHTML = await page.$$('#Stations-panel li span')
+  const stationInfoKeys = ['nearestStationName', 'nearestStationDistance']
+  let stationInfo: any = {}
   for (let i = 0; i < stationInfoKeys.length; i++) {
-    let value = await stationInfo[i].evaluate(el => el.innerHTML)
-    console.log(`${stationInfoKeys[i]}: ${value}`)
+    stationInfo[stationInfoKeys[i]] = await stationInfoHTML[i].evaluate(el => el.innerHTML)
   }
+  property.stationInfo = stationInfo
 }
 
-async function getFloorplan(page: Page, url: string, filename: string) {
+async function getFloorplanArea(page: Page, url: string, filename: string): Promise<string | null> {
+  let text = ''
+
   await page.goto(url);
   const image = await page.$('[alt^="Floorplan"]');
   if (image) {
     const imageURL = await page.evaluate(el => el.getAttribute("src"), image);
-    console.log(`Image url: ${imageURL}`);
     if (imageURL) {
       await downloadImage(imageURL, filename)
 
-      let result = await Tesseract.recognize(
-        filename,
-        'eng'
-      )
-      let text = result.data.text;
-
-      // console.log(text)
-      const match = text.match(/((([5-9]\d)|(\d{3}))\.\d{1,2}) (sq|SQ)[\s\.]*(m|M|metres|METRES)/)
-      console.log(match ? match[1] : "No match");
+      try {
+        console.log("trying to process image")
+        let text = await tesseract.recognize(
+          filename,
+          {
+            lang: "eng",
+            oem: 3,
+            psm: 6,
+          }
+        )
+        const match = text.match(/((([4-9]\d)|(\d{3}))\.\d{1,2}) (sq|SQ)[\s\.]*(m|M|metres|METRES)/)
+        if (match) {
+          return match[1];
+        }
+      }
+      catch {
+        return text
+      }
     }
+  }
+  return text
+}
+
+function flattenObject(json: any, newJson: any = {}) {
+  Object.entries(json).forEach(([key, value]) => {
+    if (typeof value === 'object') {
+      flattenObject(value, newJson)
+    }
+    else {
+      newJson[key] = value
+    }
+  })
+  return newJson
+}
+
+function outputToCSV(properties: Property[]) {
+  let writeStream = fs.createWriteStream("out.csv", "utf-8")
+  let flattenedProperties = properties.map(property => flattenObject(property))
+  // Write headers
+  let headers = ""
+  Object.keys(flattenedProperties[0]).forEach(key =>
+    headers += `"${key}",`
+  )
+  headers = headers.slice(0, -1)
+  writeStream.write(`${headers}\n`)
+
+  // Write content
+  flattenedProperties.forEach(property => {
+    let csvLine = ""
+    Object.values(property).forEach(value => {
+      csvLine += `"${value}",`
+    })
+    csvLine = csvLine.slice(0, -1)
+
+    writeStream.write(`${csvLine}\n`)
+  })
+}
+
+function createProperty(url: string): Property {
+  return {
+    id: url?.split("/")[4].slice(0, -1),
+    url: url,
+    address: "",
+    price: "",
+    property: "",
+    floorplanArea: "",
+    summaryInfo: {
+      type: "",
+      bedrooms: "",
+      bathrooms: "",
+      tenure: "",
+      size: ""
+    },
+    stationInfo: {
+      nearestStationName: "",
+      nearestStationDistance: ""
+    },
   }
 }
 
-async function main() {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
+async function getProperty(url: string, page: Page) {
+  await page.goto(url);
+
+  let property = createProperty(url);
+  await getPropertyInfo(page, property);
+  const floorplanURL = `https://rightmove.co.uk/properties/${property.id}#/floorplan?activePlan=1&channel=RES_BUY`;
+  const filename = `floorplans/floorplan-${property.id}.jpeg`;
+  property.floorplanArea = await getFloorplanArea(page, floorplanURL, filename)
+
+  return property
+}
+
+async function getProperties(url: string, page: Page) {
+  let properties: Property[] = []
+
   await page.goto(url);
   // await page.screenshot({ path: 'example.png' });
+
   const resultCount = await page.$eval('span[data-bind="counter: resultCount, formatter: numberFormatter"]', el => el.textContent)
-  console.log(resultCount)
+  console.log(`Total results: ${resultCount}`)
   const pagesText = await page.$eval('span[data-bind="text: total"]', el => el.textContent)
   const pages = pagesText ? parseInt(pagesText) : null
   if (pages) {
-    console.log(`Total Pages: ${pages}`)
+    console.log(`Total Pages: ${pages}\n`)
     for (let p = 0; p < pages; p++) {
       await page.goto(`${url}&index=${p * 24}`);
       const paths = await page.$$eval(
@@ -85,25 +158,40 @@ async function main() {
       for (let i = 0; i < paths.length; i++) {
         const relativePath = paths[i];
         if (relativePath) {
-          const propertyURL = `https://rightmove.co.uk${relativePath}`;
-          console.log(`\nParsing property number ${p * 24 + i + 1} of ${resultCount}`)
-          console.log(`\nProperty url: ${propertyURL}`);
-          const propertyID = relativePath?.split("/")[2].slice(0, -1);
-          await getSummary(page, propertyURL);
-          console.log(`Property ID: ${propertyID}`)
-          const floorplanURL = `https://rightmove.co.uk/properties/${propertyID}#/floorplan?activePlan=1&channel=RES_BUY`;
-          const filename = `floorplan-${propertyID}.jpeg`;
-          console.log(`Floorplan url: ${floorplanURL}`);
-          await getFloorplan(page, floorplanURL, filename)
+          console.log(`Parsing property number ${p * 24 + i + 1} of ${resultCount}`)
+          let propertyURL = `https://rightmove.co.uk${relativePath}`;
+          let property = await getProperty(propertyURL, page)
+
+          properties.push(property)
+          console.log(property)
+          console.log(flattenObject(property))
         }
       }
     }
   }
 
-  await browser.close();
+  outputToCSV(properties);
 }
 
 (async () => {
-  await main();
+  const browser = await puppeteer.launch();
+  const page = await browser.newPage();
+
+  const location = "REGION%5E1127"
+  const dontShow = "retirement,sharedOwnership"
+  const sortType = 1
+  const url = [
+    `https://www.rightmove.co.uk/property-for-sale/find.html?`,
+    `locationIdentifier=${location}`,
+    `&dontShow=${dontShow}`,
+    `&sortType=${sortType}`
+  ].join("");
+  console.log(url);
+  await getProperties(url, page);
+
+  // let property = await getProperty("https://www.rightmove.co.uk/properties/124723349#/?channel=RES_BUY", page)
+  // console.log(property)
+
+  await browser.close();
 })();
 
