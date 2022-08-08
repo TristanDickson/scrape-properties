@@ -1,25 +1,25 @@
 type Property = {
     id: string
     url: string
-    address: string | null
-    price: string | null
-    property: string | null
+    address: string 
+    price: string 
+    property: string 
     summaryInfo: SummaryInfo
     stationInfo: StationInfo
-    floorplanArea: string | null
+    floorplanArea: string 
 }
 
 type SummaryInfo = {
-    type?: string | null
-    bedrooms?: string | null
-    bathrooms?: string | null
-    tenure?: string | null
-    size?: string | null
+    type: string
+    bedrooms?: string
+    bathrooms?: string 
+    tenure?: string 
+    size?: string 
 }
 
 type StationInfo = {
-    nearestStationName?: string | null
-    nearestStationDistance?: string | null
+    nearestStationName?: string 
+    nearestStationDistance?: string 
 }
 
 type flattenedProperty = Property & SummaryInfo & StationInfo

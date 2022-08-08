@@ -1,13 +1,11 @@
 import { Page } from "puppeteer";
 
-type summaryInfoKey = keyof SummaryInfo
-
-const summaryInfoMap: { [key: string]: summaryInfoKey } = {
+const summaryInfoMap: { [key: string]: keyof SummaryInfo } = {
     "PROPERTY TYPE": "type",
     "BEDROOMS": "bedrooms",
     "BATHROOMS": "bathrooms",
     "TENURE": "tenure",
-    "SIZE": "size"
+    "SIZE": "size",
 }
 
 export default async function getSummaryInfo(page: Page) {
